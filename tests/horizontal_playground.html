@@ -19,49 +19,53 @@
 
       var fakeDragStack = [];
       var workspace = null;
+      var GRID_ROWS = 6;
+      var GRID_COLS = 8;
+      var robotPosition = {row: GRID_ROWS - 1, col: 0};
+      var ROBOT_DIRECTIONS = ['north', 'east', 'south', 'west'];
+      var directionVectors = {
+        north: {row: -1, col: 0},
+        east: {row: 0, col: 1},
+        south: {row: 1, col: 0},
+        west: {row: 0, col: -1}
+      };
+      var directionLabels = {
+        north: 'al norte',
+        east: 'al este',
+        south: 'al sur',
+        west: 'al oeste'
+      };
+      var robotDirection = 1;
+      var SPEED_TO_STEPS = {
+        slow: 1,
+        medium: 2,
+        fast: 3
+      };
+      var COMMAND_DELAY = 450;
+      var COMMAND_LIMIT = 200;
+      var isRunningProgram = false;
+      var commandTimer = null;
+      var programGlowBlockId = null;
 
       function start() {
-        var soundsEnabled = null;
-        if (sessionStorage) {
-          // Restore sounds state.
-          soundsEnabled = sessionStorage.getItem('soundsEnabled');
-          if (soundsEnabled === null) {
-            soundsEnabled = true;
-          } else {
-            soundsEnabled = (soundsEnabled === 'true');
-          }
-        } else {
-          soundsEnabled = true;
-        }
+        initGrid();
+
+        var soundsEnabled = getStoredSoundsPreference();
         setSoundsEnabled(soundsEnabled);
 
-        // Setup blocks
-        // Parse the URL arguments.
-        var match = location.search.match(/dir=([^&]+)/);
-        var rtl = match && match[1] == 'rtl';
-        document.forms.options.elements.dir.selectedIndex = Number(rtl);
         var toolbox = getToolboxElement();
-        document.forms.options.elements.toolbox.selectedIndex =
-          toolbox ? 1: 0;
-
-        match = location.search.match(/side=([^&]+)/);
-
-        var side = match ? match[1] : 'start';
-
-        document.forms.options.elements.side.value = side;
-
         workspace = Blockly.inject('blocklyDiv', {
           comments: false,
           disable: false,
           collapse: false,
           media: '../media/',
           readOnly: false,
-          rtl: rtl,
+          rtl: false,
           scrollbars: true,
           toolbox: toolbox,
           trashcan: true,
-          horizontalLayout: side == 'top' || side == 'bottom',
-          toolboxPosition: side == 'top' || side == 'start' ? 'start' : 'end',
+          horizontalLayout: true,
+          toolboxPosition: 'end',
           sounds: soundsEnabled,
           grid: {spacing: 16,
             length: 1,
@@ -81,28 +85,337 @@
             dragShadowOpacity: 0.6
           }
         });
-        
+
         if (sessionStorage) {
-          // Restore previously displayed text.
           var text = sessionStorage.getItem('textarea');
           if (text) {
             document.getElementById('importExport').value = text;
           }
           taChange();
 
-          // Restore event logging state.
           var state = sessionStorage.getItem('logEvents');
           logEvents(Boolean(state));
 
-          // Restore flyout event logging state.
           state = sessionStorage.getItem('logFlyoutEvents');
           logFlyoutEvents(Boolean(state));
         }
       }
 
+      function getStoredSoundsPreference() {
+        if (!sessionStorage) {
+          return true;
+        }
+        var soundsEnabled = sessionStorage.getItem('soundsEnabled');
+        if (soundsEnabled === null) {
+          return true;
+        }
+        return soundsEnabled === 'true';
+      }
+
       function getToolboxElement() {
-        var match = location.search.match(/toolbox=([^&]+)/);
-        return document.getElementById('toolbox-' + (match ? match[1] : 'categories'));
+        var inlineToolbox = document.getElementById('toolbox-categories');
+        if (inlineToolbox) {
+          return inlineToolbox;
+        }
+        if (window.DOMParser && Blockly && Blockly.Blocks &&
+            Blockly.Blocks.defaultToolbox) {
+          var parser = new DOMParser();
+          var toolboxDoc = parser.parseFromString(
+              Blockly.Blocks.defaultToolbox, 'text/xml');
+          return toolboxDoc.documentElement;
+        }
+        return null;
+      }
+
+      function initGrid() {
+        var gridElement = document.getElementById('gameGrid');
+        if (!gridElement) {
+          return;
+        }
+        gridElement.innerHTML = '';
+        for (var row = 0; row < GRID_ROWS; row++) {
+          for (var col = 0; col < GRID_COLS; col++) {
+            var cell = document.createElement('div');
+            cell.className = 'grid-cell';
+            cell.setAttribute('role', 'gridcell');
+            cell.setAttribute('aria-label', 'Fila ' + (row + 1) + ', columna ' + (col + 1));
+            gridElement.appendChild(cell);
+          }
+        }
+        resetRobot();
+      }
+
+      function updateRobot() {
+        var gridElement = document.getElementById('gameGrid');
+        if (!gridElement) {
+          return;
+        }
+        var cells = gridElement.getElementsByClassName('grid-cell');
+        for (var i = 0; i < cells.length; i++) {
+          cells[i].classList.remove('robot', 'dir-north', 'dir-east', 'dir-south', 'dir-west');
+        }
+        var clampedRow = Math.max(0, Math.min(GRID_ROWS - 1, robotPosition.row));
+        var clampedCol = Math.max(0, Math.min(GRID_COLS - 1, robotPosition.col));
+        robotPosition.row = clampedRow;
+        robotPosition.col = clampedCol;
+        var index = clampedRow * GRID_COLS + clampedCol;
+        var direction = ROBOT_DIRECTIONS[robotDirection];
+        if (cells[index]) {
+          cells[index].classList.add('robot', 'dir-' + direction);
+        }
+        var status = document.getElementById('robotStatus');
+        if (status) {
+          status.textContent = 'Robot en fila ' + (clampedRow + 1) +
+            ', columna ' + (clampedCol + 1) + ' mirando ' + directionLabels[direction];
+        }
+      }
+
+      function resetRobot() {
+        stopProgramExecution();
+        robotPosition = {row: GRID_ROWS - 1, col: 0};
+        robotDirection = 1;
+        updateRobot();
+      }
+
+      function runProgram() {
+        if (!workspace) {
+          return;
+        }
+        stopProgramExecution();
+        resetRobot();
+        var commands = buildCommandSequence();
+        if (!commands.length) {
+          var status = document.getElementById('robotStatus');
+          if (status) {
+            status.textContent = 'Agrega bloques del Robot y presiona Play para comenzar.';
+          }
+          return;
+        }
+        isRunningProgram = true;
+        var index = 0;
+        function executeNext() {
+          if (index >= commands.length) {
+            stopProgramExecution();
+            return;
+          }
+          var shouldContinue = commands[index++]();
+          if (shouldContinue === false) {
+            stopProgramExecution();
+            return;
+          }
+          commandTimer = window.setTimeout(executeNext, COMMAND_DELAY);
+        }
+        executeNext();
+      }
+
+      function stopProgramExecution() {
+        if (commandTimer) {
+          clearTimeout(commandTimer);
+          commandTimer = null;
+        }
+        isRunningProgram = false;
+        setProgramGlow(null);
+      }
+
+      function buildCommandSequence() {
+        if (!workspace) {
+          return [];
+        }
+        var commands = [];
+        var topBlocks = workspace.getTopBlocks(true);
+        var hasEvent = false;
+        for (var i = 0; i < topBlocks.length; i++) {
+          if (topBlocks[i].type === 'event_whenflagclicked') {
+            hasEvent = true;
+            collectStackCommands(topBlocks[i].getNextBlock(), commands);
+          }
+        }
+        if (!hasEvent) {
+          for (var j = 0; j < topBlocks.length; j++) {
+            collectStackCommands(topBlocks[j], commands);
+          }
+        }
+        if (commands.length > COMMAND_LIMIT) {
+          commands.length = COMMAND_LIMIT;
+        }
+        return commands;
+      }
+
+      function collectStackCommands(block, commands) {
+        var cursor = block;
+        while (cursor && commands.length < COMMAND_LIMIT) {
+          appendCommandForBlock(cursor, commands);
+          cursor = cursor.getNextBlock();
+        }
+      }
+
+      function appendCommandForBlock(block, commands) {
+        if (!block) {
+          return;
+        }
+        switch (block.type) {
+          case 'wedo_motorspeed':
+            var steps = getSpeedSteps(block);
+            if (steps > 0) {
+              pushCommandForBlock(commands, block, (function(stepCount) {
+                return function() {
+                  moveRobotForward(stepCount);
+                };
+              })(steps));
+            }
+            break;
+          case 'wedo_motorclockwise':
+            queueRotations(commands, block, 1,
+              extractNumberFromInput(block, 'DURATION', 1));
+            break;
+          case 'wedo_motorcounterclockwise':
+            queueRotations(commands, block, -1,
+              extractNumberFromInput(block, 'DURATION', 1));
+            break;
+          case 'control_repeat':
+            var times = Math.max(0, Math.floor(extractNumberFromInput(block, 'TIMES', 1)));
+            var substack = block.getInputTargetBlock('SUBSTACK');
+            for (var i = 0; i < times && commands.length < COMMAND_LIMIT; i++) {
+              collectStackCommands(substack, commands);
+            }
+            break;
+          case 'control_forever':
+            var loop = block.getInputTargetBlock('SUBSTACK');
+            for (var j = 0; j < 4 && commands.length < COMMAND_LIMIT; j++) {
+              collectStackCommands(loop, commands);
+            }
+            break;
+          case 'control_wait':
+            queueWait(commands, block,
+              extractNumberFromInput(block, 'DURATION', 1));
+            break;
+          case 'control_stop':
+            pushCommandForBlock(commands, block, function() {
+              return false;
+            });
+            break;
+        }
+      }
+
+      function queueRotations(commands, block, delta, count) {
+        var turns = Math.max(0, Math.round(count || 0));
+        if (!turns) {
+          return;
+        }
+        turns = Math.min(turns, 24);
+        for (var i = 0; i < turns && commands.length < COMMAND_LIMIT; i++) {
+          pushCommandForBlock(commands, block, (function(step) {
+            return function() {
+              rotateRobot(step);
+            };
+          })(delta));
+        }
+      }
+
+      function queueWait(commands, block, duration) {
+        var steps = Math.max(1, Math.round(duration || 1));
+        steps = Math.min(steps, 20);
+        for (var i = 0; i < steps && commands.length < COMMAND_LIMIT; i++) {
+          pushCommandForBlock(commands, block, function() {
+            return true;
+          });
+        }
+      }
+
+      function moveRobotForward(steps) {
+        var distance = Math.max(0, Math.floor(steps));
+        if (!distance) {
+          return;
+        }
+        var direction = ROBOT_DIRECTIONS[robotDirection];
+        var vector = directionVectors[direction];
+        for (var i = 0; i < distance; i++) {
+          var nextRow = robotPosition.row + vector.row;
+          var nextCol = robotPosition.col + vector.col;
+          if (nextRow < 0 || nextRow >= GRID_ROWS || nextCol < 0 || nextCol >= GRID_COLS) {
+            break;
+          }
+          robotPosition.row = nextRow;
+          robotPosition.col = nextCol;
+        }
+        updateRobot();
+      }
+
+      function rotateRobot(deltaTurns) {
+        var len = ROBOT_DIRECTIONS.length;
+        var turns = deltaTurns || 0;
+        robotDirection = (robotDirection + turns) % len;
+        if (robotDirection < 0) {
+          robotDirection += len;
+        }
+        updateRobot();
+      }
+
+      function getSpeedSteps(block) {
+        var speedBlock = block.getInputTargetBlock('CHOICE');
+        var selected = null;
+        if (speedBlock) {
+          var field = speedBlock.getField && speedBlock.getField('CHOICE');
+          if (field) {
+            selected = field.getValue();
+          } else if (speedBlock.getFieldValue) {
+            selected = speedBlock.getFieldValue('CHOICE') ||
+              speedBlock.getFieldValue('TEXT') ||
+              speedBlock.getFieldValue('NUM');
+          }
+        }
+        var value = selected || 'slow';
+        return SPEED_TO_STEPS[value] || 1;
+      }
+
+      function extractNumberFromInput(block, inputName, fallback) {
+        if (!block) {
+          return fallback;
+        }
+        var target = block.getInputTargetBlock(inputName);
+        return extractNumberFromBlock(target, fallback);
+      }
+
+      function extractNumberFromBlock(block, fallback) {
+        if (!block) {
+          return fallback;
+        }
+        var fieldOrder = ['NUM', 'VALUE', 'TEXT'];
+        for (var i = 0; i < fieldOrder.length; i++) {
+          var field = block.getField(fieldOrder[i]);
+          if (field) {
+            var asNumber = parseFloat(field.getValue());
+            if (!isNaN(asNumber)) {
+              return asNumber;
+            }
+          }
+        }
+        var text = block.getFieldValue && block.getFieldValue('NUM');
+        var fallbackNumber = parseFloat(text);
+        return isNaN(fallbackNumber) ? fallback : fallbackNumber;
+      }
+
+      function setProgramGlow(blockId) {
+        if (programGlowBlockId && programGlowBlockId !== blockId) {
+          unglowBlock(programGlowBlockId);
+        }
+        if (blockId) {
+          glowBlock(blockId);
+        } else if (programGlowBlockId) {
+          unglowBlock(programGlowBlockId);
+        }
+        programGlowBlockId = blockId || null;
+      }
+
+      function pushCommandForBlock(commands, block, action) {
+        if (commands.length >= COMMAND_LIMIT) {
+          return;
+        }
+        var blockId = block ? block.id : null;
+        commands.push(function() {
+          setProgramGlow(blockId);
+          return action();
+        });
       }
 
       function toXml() {
@@ -139,22 +452,31 @@
 
       function logEvents(state) {
         var checkbox = document.getElementById('logCheck');
-        checkbox.checked = state;
+        if (checkbox) {
+          checkbox.checked = state;
+        }
         if (sessionStorage) {
           sessionStorage.setItem('logEvents', state ? 'checked' : '');
         }
-        if (state) {
-          workspace.addChangeListener(logger);
-        } else {
-          workspace.removeChangeListener(logger);
+        if (workspace) {
+          if (state) {
+            workspace.addChangeListener(logger);
+          } else {
+            workspace.removeChangeListener(logger);
+          }
         }
       }
 
       function logFlyoutEvents(state) {
         var checkbox = document.getElementById('logFlyoutCheck');
-        checkbox.checked = state;
+        if (checkbox) {
+          checkbox.checked = state;
+        }
         if (sessionStorage) {
           sessionStorage.setItem('logFlyoutEvents', state ? 'checked' : '');
+        }
+        if (!workspace) {
+          return;
         }
         var flyoutWorkspace = (workspace.flyout_) ? workspace.flyout_.workspace_ :
           workspace.toolbox_.flyout_.workspace_;
@@ -169,16 +491,26 @@
         console.log(e);
       }
 
-      function glowBlock() {
-        if (Blockly.selected) {
-          workspace.glowBlock(Blockly.selected.id, true);
+      function glowBlock(blockId) {
+        if (!workspace || !workspace.glowBlock) {
+          return;
         }
+        var targetId = blockId || (Blockly.selected && Blockly.selected.id);
+        if (!targetId) {
+          return;
+        }
+        workspace.glowBlock(targetId, true);
       }
 
-      function unglowBlock() {
-        if (Blockly.selected) {
-          workspace.glowBlock(Blockly.selected.id, false);
+      function unglowBlock(blockId) {
+        if (!workspace || !workspace.glowBlock) {
+          return;
         }
+        var targetId = blockId || (Blockly.selected && Blockly.selected.id);
+        if (!targetId) {
+          return;
+        }
+        workspace.glowBlock(targetId, false);
       }
 
       function glowStack() {
@@ -239,7 +571,9 @@
 
       function setSoundsEnabled(state) {
         var checkbox = document.getElementById('soundsEnabled');
-        checkbox.checked = (state) ? 'checked' : '';
+        if (checkbox) {
+          checkbox.checked = state;
+        }
         if (sessionStorage) {
           sessionStorage.setItem('soundsEnabled', state);
         }
@@ -310,112 +644,345 @@
       }
 
       body {
-        background-color: #fff;
-        font-family: sans-serif;
+        margin: 0;
+        background-color: #0f172a;
+        color: #e5e7eb;
+        font-family: 'Helvetica Neue', Arial, sans-serif;
         overflow: hidden;
+        display: flex;
+        flex-direction: column;
       }
 
-      h1 {
-        font-weight: normal;
-        font-size: 140%;
+      #gameArea {
+        flex: 1 1 auto;
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        min-height: 0;
       }
 
-      #blocklyDiv {
-        float: right;
-        height: 95%;
-        width: 70%;
+      .game-header h1 {
+        margin: 0 0 8px;
+        font-weight: 600;
+        font-size: 1.6rem;
       }
 
-      #collaborators {
-        float: right;
-        width: 30px;
-        margin-left: 10px;
+      .game-header p {
+        margin: 0;
+        color: #cbd5f5;
+        max-width: 600px;
       }
 
-      #collaborators > img {
-        margin-right: 5px;
-        height: 30px;
-        padding-bottom: 5px;
-        width: 30px;
-        border-radius: 3px;
+      #gridWrapper {
+        flex: 1;
+        display: flex;
+        gap: 24px;
+        min-height: 0;
+      }
+
+      #gameGrid {
+        flex: 1;
+        display: grid;
+        grid-template-columns: repeat(8, 1fr);
+        grid-template-rows: repeat(6, 1fr);
+        gap: 8px;
+        background: #0b1221;
+        border-radius: 18px;
+        padding: 16px;
+        box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.2);
+      }
+
+      .grid-cell {
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.85);
+        position: relative;
+      }
+
+      .grid-cell.robot {
+        background: linear-gradient(135deg, #22d3ee, #3b82f6);
+        box-shadow: 0 0 12px rgba(34, 211, 238, 0.6);
+      }
+
+      .grid-cell.robot::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 0;
+        height: 0;
+        border-style: solid;
+        border-width: 0 8px 14px 8px;
+        border-color: transparent transparent #0f172a transparent;
+        transform: translate(-50%, -50%) rotate(0deg);
+      }
+
+      .grid-cell.robot.dir-east::after {
+        transform: translate(-50%, -50%) rotate(90deg);
+      }
+
+      .grid-cell.robot.dir-south::after {
+        transform: translate(-50%, -50%) rotate(180deg);
+      }
+
+      .grid-cell.robot.dir-west::after {
+        transform: translate(-50%, -50%) rotate(-90deg);
+      }
+
+      #gridPanel {
+        width: 240px;
+        background: rgba(15, 23, 42, 0.65);
+        border-radius: 18px;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      #gridPanel p {
+        margin: 0;
+        line-height: 1.4;
+      }
+
+      #gridPanel .hint {
+        font-size: 0.85rem;
+        color: #94a3b8;
+      }
+
+      #gridPanel .panel-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      #gridPanel button {
+        border: none;
+        background: #22d3ee;
+        color: #0f172a;
+        padding: 10px 18px;
+        border-radius: 999px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s ease;
+      }
+
+      #gridPanel button.secondary {
+        background: transparent;
+        border: 1px solid rgba(148, 163, 184, 0.6);
+        color: #e2e8f0;
+      }
+
+      #gridPanel button:hover {
+        background: #0ea5e9;
+      }
+
+      #gridPanel button.secondary:hover {
+        background: rgba(148, 163, 184, 0.2);
+      }
+
+      #blocklyArea {
+        flex: none;
+        height: 45vh;
+        min-height: 340px;
+        background: #f8fafc;
+        display: flex;
+        gap: 16px;
+        padding: 16px 24px 24px;
+        border-top: 1px solid #0b1221;
+        box-shadow: inset 0 1px 0 rgba(15, 23, 42, 0.2);
+      }
+
+      #workspaceToolbar {
+        width: 320px;
+        min-width: 280px;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        color: #0f172a;
+        overflow-y: auto;
+      }
+
+      .toolbar-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .toolbar-row label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.9rem;
+        color: #475569;
       }
 
       #importExport {
+        width: 100%;
+        height: 100px;
+        min-height: 80px;
         font-family: monospace;
+        border-radius: 8px;
+        border: 1px solid #cbd5f5;
+        padding: 8px;
+        resize: vertical;
+        background: #f8fafc;
+      }
+
+      #workspaceToolbar button {
+        border: none;
+        background: #e2e8f0;
+        color: #0f172a;
+        padding: 6px 14px;
+        border-radius: 999px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      #workspaceToolbar button:hover {
+        background: #cbd5f5;
+      }
+
+      #blocklyDiv {
+        flex: 1;
+        min-height: 0;
+        border-radius: 18px;
+        overflow: hidden;
+        background: #ffffff;
+      }
+
+      @media (max-width: 960px) {
+        #blocklyArea {
+          flex-direction: column;
+          height: 55vh;
+        }
+        #workspaceToolbar {
+          width: 100%;
+          min-width: 0;
+          max-height: 45%;
+        }
       }
     </style>
   </head>
 
   <body onload="start()">
-    <div id="collaborators"></div>
-    <div id="blocklyDiv"></div>
+    <div id="gameArea">
+      <div class="game-header">
+        <h1>Playground horizontal con grilla 8x6</h1>
+        <p>Programa en LTR con categorías horizontales ubicadas en la parte inferior. Usa los bloques para mover el robot en la grilla superior.</p>
+      </div>
+      <div id="gridWrapper">
+        <div id="gameGrid" role="grid" aria-label="Grilla de 8 columnas por 6 filas"></div>
+        <div id="gridPanel">
+          <p id="robotStatus">Robot en fila 6, columna 1 mirando al este</p>
+          <div class="panel-actions">
+            <button type="button" class="primary" onclick="runProgram()">Play</button>
+            <button type="button" class="secondary" onclick="resetRobot()">Reiniciar robot</button>
+          </div>
+          <p class="hint">Play recorre los bloques del robot. Usa Reiniciar para volver al punto de partida.</p>
+        </div>
+      </div>
+    </div>
+    <div id="blocklyArea">
+      <div id="workspaceToolbar">
+        <div class="toolbar-row">
+          <button type="button" onclick="toXml()">Exportar XML</button>
+          <button type="button" onclick="fromXml()" id="import">Importar XML</button>
+          <button type="button" onclick="workspace && workspace.undo()">Undo</button>
+          <button type="button" onclick="workspace && workspace.undo(true)">Redo</button>
+        </div>
+        <textarea id="importExport" onchange="taChange();" onkeyup="taChange()"></textarea>
+        <div class="toolbar-row">
+          <label>
+            <input type="checkbox" onclick="logEvents(this.checked)" id="logCheck">
+            Registrar eventos
+          </label>
+          <label>
+            <input type="checkbox" onclick="logFlyoutEvents(this.checked)" id="logFlyoutCheck">
+            Registrar flyout
+          </label>
+          <label>
+            <input type="checkbox" onclick="setSoundsEnabled(this.checked)" id="soundsEnabled">
+            Sonidos (recarga)
+          </label>
+        </div>
+        <div class="toolbar-row">
+          <button type="button" onclick="sprinkles(100)">Sprinkles</button>
+          <button type="button" onclick="spaghetti(10)">Spaghetti</button>
+          <button type="button" onclick="fakeManyDrags()">Fake drags</button>
+          <button type="button" onclick="glowBlock()">Glow bloque</button>
+          <button type="button" onclick="unglowBlock()">Apagar glow</button>
+          <button type="button" onclick="glowStack()">Glow stack</button>
+          <button type="button" onclick="unglowStack()">Apagar stack</button>
+        </div>
+      </div>
+      <div id="blocklyDiv"></div>
+    </div>
 
-    <!-- Sidebar -->
-    <h1>Horizontal Blocks</h1>
-    <p>
-      <a href="javascript:void(workspace.setVisible(true))">Show</a>
-      - <a href="javascript:void(workspace.setVisible(false))">Hide</a>
-    </p>
-
-    <form id="options">
-        <select name="dir" onchange="document.forms.options.submit()">
-          <option value="ltr">LTR</option>
-          <option value="rtl">RTL</option>
-        </select>
-        <select name="toolbox" onchange="document.forms.options.submit()">
-          <option value="categories">Categories</option>
-          <option value="simple">Simple</option>
-        </select>
-        <select name="side" onchange="document.forms.options.submit()">
-          <option value="start">Start</option>
-          <option value="end">End</option>
-          <option value="top">Top</option>
-          <option value="bottom">Bottom</option>
-        </select>
-      </form>
-
-    <p>
-      <input type="button" value="Export to XML" onclick="toXml()">
-      &nbsp;
-      <input type="button" value="Import from XML" onclick="fromXml()" id="import">
-      <br>
-      <textarea id="importExport" style="width: 26%; height: 12em"
-        onchange="taChange();" onkeyup="taChange()"></textarea>
-    </p>
-
-    <p>
-      Log events: &nbsp;
-      <input type="checkbox" onclick="logEvents(this.checked)" id="logCheck">
-    </p>
-
-    <p>
-      Log flyout events: &nbsp;
-      <input type="checkbox" onclick="logFlyoutEvents(this.checked)" id="logFlyoutCheck">
-    </p>
-
-    <p>
-      Enable sounds (after refresh): &nbsp;
-      <input type="checkbox" onclick="setSoundsEnabled(this.checked)" id="soundsEnabled">
-    </p>
-
-    <p>
-      Stress test: &nbsp;
-      <input type="button" value="Sprinkles!" onclick="sprinkles(100)">
-      <input type="button" value="Spaghetti!" onclick="spaghetti(10)">
-      <input type="button" value="Fake some drags!" onclick="fakeManyDrags()">
-    </p>
-
-    <p>
-      Glows: &nbsp;
-      <input type="button" value="Glow last clicked block" onclick="glowBlock()" />
-      <input type="button" value="Unglow last clicked block" onclick="unglowBlock()" />
-      <input type="button" value="Stack glow last clicked block" onclick="glowStack()" />
-      <input type="button" value="Stack unglow last clicked block" onclick="unglowStack()" />
-    </p>
-
-    <p>
-      <input type="button" value="Undo" onclick="workspace.undo()" />
-      <input type="button" value="Redo" onclick="workspace.undo(true)" />
-    </p>
+    <xml id="toolbox-categories" style="display: none">
+      <category name="Eventos">
+        <block type="event_whenflagclicked"></block>
+        <block type="event_whenbroadcastreceived">
+          <value name="CHOICE">
+            <shadow type="dropdown_whenbroadcast">
+              <field name="CHOICE">blue</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="event_broadcast">
+          <value name="CHOICE">
+            <shadow type="dropdown_broadcast">
+              <field name="CHOICE">blue</field>
+            </shadow>
+          </value>
+        </block>
+      </category>
+      <category name="Control">
+        <block type="control_forever"></block>
+        <block type="control_repeat">
+          <value name="TIMES">
+            <shadow type="math_whole_number">
+              <field name="NUM">4</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="control_wait">
+          <value name="DURATION">
+            <shadow type="math_positive_number">
+              <field name="NUM">1</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="control_stop"></block>
+      </category>
+      <category name="Robot">
+        <block type="wedo_motorspeed">
+          <value name="CHOICE">
+            <shadow type="dropdown_wedo_motorspeed">
+              <field name="CHOICE">slow</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="wedo_motorclockwise">
+          <value name="DURATION">
+            <shadow type="math_whole_number">
+              <field name="NUM">1</field>
+            </shadow>
+          </value>
+        </block>
+        <block type="wedo_motorcounterclockwise">
+          <value name="DURATION">
+            <shadow type="math_whole_number">
+              <field name="NUM">1</field>
+            </shadow>
+          </value>
+        </block>
+      </category>
+    </xml>
   </body>
 </html>
